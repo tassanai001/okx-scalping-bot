@@ -9,97 +9,109 @@ class MarketDataEmitter extends EventEmitter {}
 const marketDataEmitter = new MarketDataEmitter();
 
 function connectWebSocket() {
-  ws = new WebSocket(config.OKX_WS_URL);
-  
-  ws.on("open", function open() {
-    console.log("✅ Connected to OKX WebSocket");
-    reconnectAttempts = 0; // Reset reconnect counter
-    
-    // Subscribe to ticker updates for futures
-    const subscribeMsg = JSON.stringify({
-      op: "subscribe",
-      args: [{ channel: "tickers", instId: config.TRADING_PAIR }]
-    });
-    
-    // Subscribe to candlestick data
-    const candleSubscribeMsg = JSON.stringify({
-      op: "subscribe",
-      args: [{ 
-        channel: "candle" + config.TIMEFRAME, 
-        instId: config.TRADING_PAIR 
-      }]
-    });
-    
-    ws.send(subscribeMsg);
-    ws.send(candleSubscribeMsg);
-    
-    console.log(`📝 Subscribed to ${config.TRADING_PAIR} futures market data`);
-    console.log(`📊 Timeframe: ${config.TIMEFRAME}`);
-  });
-  
-  ws.on("message", function incoming(data) {
+  return new Promise((resolve, reject) => {
     try {
-      const json = JSON.parse(data);
+      // Use simulated WebSocket URL if simulated trading is enabled
+      const wsUrl = config.USE_SIMULATED_TRADING ? config.OKX_WS_URL_SIMULATED : config.OKX_WS_URL;
+      console.log(`🔌 Connecting to WebSocket: ${wsUrl}`);
       
-      if (json.event === "subscribe") {
-        console.log(`✅ Subscribed to channel: ${json.arg.channel}`);
-      } else if (json.data) {
-        // Handle ticker updates
-        if (json.arg && json.arg.channel === "tickers") {
-          const serverTime = parseInt(json.data[0].ts);
-          const localTime = Date.now();
-          
-          // Check time synchronization
-          if (Math.abs(serverTime - localTime) > config.TIME_SYNC_THRESHOLD) {
-            console.warn(`⚠️ Time synchronization issue detected! Server-client time difference: ${Math.abs(serverTime - localTime)}ms`);
-          }
-          
-          const marketData = {
-            price: parseFloat(json.data[0].last),
-            volume: parseFloat(json.data[0].vol24h),
-            timestamp: localTime,
-            serverTime: serverTime
-          };
-          
-          marketDataEmitter.emit("marketData", marketData);
-        }
+      ws = new WebSocket(wsUrl);
+      
+      ws.on("open", function open() {
+        console.log("✅ Connected to OKX WebSocket");
+        reconnectAttempts = 0; // Reset reconnect counter
         
-        // Handle candlestick data
-        if (json.arg && json.arg.channel.startsWith("candle")) {
-          const candleData = {
-            open: parseFloat(json.data[0][1]),
-            high: parseFloat(json.data[0][2]),
-            low: parseFloat(json.data[0][3]),
-            close: parseFloat(json.data[0][4]),
-            volume: parseFloat(json.data[0][5]),
-            timestamp: parseInt(json.data[0][0])
-          };
+        // Subscribe to ticker updates for futures
+        const subscribeMsg = JSON.stringify({
+          op: "subscribe",
+          args: [{ channel: "tickers", instId: config.TRADING_PAIR }]
+        });
+        
+        // Subscribe to candlestick data
+        const candleSubscribeMsg = JSON.stringify({
+          op: "subscribe",
+          args: [{ 
+            channel: "candle" + config.TIMEFRAME, 
+            instId: config.TRADING_PAIR 
+          }]
+        });
+        
+        ws.send(subscribeMsg);
+        ws.send(candleSubscribeMsg);
+        
+        console.log(`📝 Subscribed to ${config.TRADING_PAIR} futures market data`);
+        console.log(`📊 Timeframe: ${config.TIMEFRAME}`);
+        resolve();
+      });
+      
+      ws.on("message", function incoming(data) {
+        try {
+          const json = JSON.parse(data);
           
-          marketDataEmitter.emit("candle", candleData);
+          if (json.event === "subscribe") {
+            console.log(`✅ Subscribed to channel: ${json.arg.channel}`);
+          } else if (json.data) {
+            // Handle ticker updates
+            if (json.arg && json.arg.channel === "tickers") {
+              const serverTime = parseInt(json.data[0].ts);
+              const localTime = Date.now();
+              
+              // Check time synchronization
+              if (Math.abs(serverTime - localTime) > config.TIME_SYNC_THRESHOLD) {
+                console.warn(`⚠️ Time synchronization issue detected! Server-client time difference: ${Math.abs(serverTime - localTime)}ms`);
+              }
+              
+              const marketData = {
+                price: parseFloat(json.data[0].last),
+                volume: parseFloat(json.data[0].vol24h),
+                timestamp: localTime,
+                serverTime: serverTime
+              };
+              
+              marketDataEmitter.emit("marketData", marketData);
+            }
+            
+            // Handle candlestick data
+            if (json.arg && json.arg.channel.startsWith("candle")) {
+              const candleData = {
+                open: parseFloat(json.data[0][1]),
+                high: parseFloat(json.data[0][2]),
+                low: parseFloat(json.data[0][3]),
+                close: parseFloat(json.data[0][4]),
+                volume: parseFloat(json.data[0][5]),
+                timestamp: parseInt(json.data[0][0])
+              };
+              
+              marketDataEmitter.emit("candle", candleData);
+            }
+          }
+        } catch (error) {
+          console.error("🚨 WebSocket message parsing error:", error.message);
         }
-      }
+      });
+
+      ws.on("error", function error(err) {
+        console.error("🚨 WebSocket Error:", err.message);
+        reject(err);
+      });
+
+      ws.on("close", function close() {
+        console.log("❌ WebSocket connection closed");
+        attemptReconnect();
+      });
+
+      // Set a ping interval to keep the connection alive
+      const pingInterval = setInterval(() => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.ping();
+        } else {
+          clearInterval(pingInterval);
+        }
+      }, 30000); // Send ping every 30 seconds
     } catch (error) {
-      console.error("🚨 WebSocket message parsing error:", error.message);
+      reject(error);
     }
   });
-
-  ws.on("error", function error(err) {
-    console.error("🚨 WebSocket Error:", err.message);
-  });
-
-  ws.on("close", function close() {
-    console.log("❌ WebSocket connection closed");
-    attemptReconnect();
-  });
-
-  // Set a ping interval to keep the connection alive
-  const pingInterval = setInterval(() => {
-    if (ws.readyState === WebSocket.OPEN) {
-      ws.ping();
-    } else {
-      clearInterval(pingInterval);
-    }
-  }, 30000); // Send ping every 30 seconds
 }
 
 function attemptReconnect() {

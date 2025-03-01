@@ -2,18 +2,32 @@ require("dotenv").config();
 const config = require("./config");
 const { connectWebSocket, marketDataEmitter } = require("./okx-client");
 const { processCandle } = require("./strategy");
-const { placeOrder, setLeverage } = require("./trader");
+const { placeOrder, setLeverage, getTradeSize } = require("./trader");
 
 // Global variables
 let lastTradeTime = 0;
 let isTrading = false;
 
 // Initialize the bot
-async function init() {
-  console.log("🚀 Starting OKX Trading Bot...");
-  console.log(`💱 Trading ${config.TRADING_PAIR} with ${config.LEVERAGE}x leverage in ${config.TRADE_MODE} mode (FUTURES)`);
-  console.log(`📊 Strategy: ${config.STRATEGY} with ${config.TIMEFRAME} timeframe`);
-  
+async function initBot() {
+  try {
+    console.log("🤖 OKX Scalping Bot for Futures");
+    console.log("==============================");
+    console.log(`📊 Trading Pair: ${config.TRADING_PAIR}`);
+    console.log(`⏱️ Timeframe: ${config.TIMEFRAME}`);
+    console.log(`🔧 Strategy: ${config.STRATEGY}`);
+    console.log(`⚙️ Mode: ${config.TRADE_MODE}`);
+    console.log(`📈 Leverage: ${config.LEVERAGE}x`);
+    console.log(`💰 Using ${config.USE_PERCENTAGE_OF_BALANCE}% of ${config.USE_PERCENTAGE_OF_BALANCE_CURRENCY} balance per trade`);
+    if (config.USE_SIMULATED_TRADING) {
+      console.log(`🧪 SIMULATED TRADING MODE ENABLED (Demo)`);
+    }
+    console.log("==============================");
+  } catch (error) {
+    console.error("❌ Initialization error:", error.message);
+    process.exit(1);
+  }
+
   // Setup error handling
   process.on("uncaughtException", (error) => {
     console.error("🔥 CRITICAL ERROR:", error);
@@ -35,6 +49,13 @@ async function init() {
   } catch (error) {
     console.error("❌ Failed to set leverage:", error.message);
   }
+  
+  // Get dynamic trade size
+  try {
+    await getTradeSize(config.USE_PERCENTAGE_OF_BALANCE_CURRENCY, config.USE_PERCENTAGE_OF_BALANCE);
+  } catch (error) {
+    console.error("❌ Failed to get trade size:", error.message);
+  }
 }
 
 // Handle trading signals
@@ -51,7 +72,8 @@ marketDataEmitter.on("signal", async (signal) => {
   if (!isTrading) {
     isTrading = true;
     try {
-      await placeOrder(config.TRADING_PAIR, signal.action, config.TRADE_SIZE);
+      // Place order with dynamic size (passing null tells the trader to calculate size)
+      await placeOrder(config.TRADING_PAIR, signal.action, null);
       lastTradeTime = Date.now();
     } catch (error) {
       console.error("❌ Error executing trade:", error.message);
@@ -64,7 +86,7 @@ marketDataEmitter.on("signal", async (signal) => {
 });
 
 // Start the bot
-init().catch(error => {
+initBot().catch(error => {
   console.error("❌ Initialization error:", error.message);
   process.exit(1);
 });
