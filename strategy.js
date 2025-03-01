@@ -1,303 +1,363 @@
+/**
+ * Strategy module for OKX Scalping Bot
+ * Implements technical analysis strategies for trading signals
+ */
 const { marketDataEmitter } = require("./okx-client");
-const { EMA, SMA, ATR, SD } = require("ta.js");
+const config = require("./config");
+const ta = require("ta.js");
 const EventEmitter = require("events");
 
-// Create a trading signal emitter
-class TradingSignalEmitter extends EventEmitter {}
-const tradingSignalEmitter = new TradingSignalEmitter();
+// Create signal emitter
+class SignalEmitter extends EventEmitter {}
+const signalEmitter = new SignalEmitter();
 
-// Strategy configuration
-const CONFIG = {
-  strategy: "COMBINED", // Options: "EMA", "COMBINED"
-  timeframe: "30m",     // 30-minute candles
-  
-  // EMA Strategy Config
-  emaShortPeriod: 9,
-  emaLongPeriod: 21,
-  
-  // Combined Strategy Config
-  // Trend Line & BB Settings
-  tlbbFractalsPeriod: 15,
-  bbLength: 20,
-  bbDeviation: 2.0,
-  
-  // Supertrend Settings
-  stPeriod: 10,
-  stMultiplier: 3.0
-};
-
-// Convert timeframe to milliseconds for comparison
-const TIMEFRAME_MS = (() => {
-  const [value, unit] = CONFIG.timeframe.match(/(\d+)([a-z]+)/i).slice(1);
-  const multipliers = {
-    m: 60 * 1000,        // minutes
-    h: 60 * 60 * 1000,   // hours
-    d: 24 * 60 * 60 * 1000 // days
-  };
-  return parseInt(value) * multipliers[unit.toLowerCase()];
-})();
-
-// Price history and OHLC data
+// Store price history
 let priceHistory = [];
 let ohlcHistory = [];
-let lastSignal = "HOLD";
 
-// Current candle being built
-let currentCandle = null;
+// Track last processed candle timestamp
+let lastCandleTimestamp = 0;
 
-// Function to calculate median of array
-const median = (arr) => {
-  const sorted = [...arr].sort((a, b) => a - b);
-  const middle = Math.floor(sorted.length / 2);
+// Track bot state for signal generation
+let inPosition = false;
+let positionType = null; // "long" or "short"
+
+// Validate configuration
+function validateConfig() {
+  const requiredConfigs = [
+    "TRADING_PAIR", "TRADE_SIZE", "TRADE_COOLDOWN", 
+    "STRATEGY", "TIMEFRAME", "EMA_SHORT_PERIOD", "EMA_LONG_PERIOD",
+    "TLBB_FRACTALS_PERIOD", "BB_LENGTH", "BB_DEVIATION",
+    "ST_PERIOD", "ST_MULTIPLIER"
+  ];
   
-  if (sorted.length % 2 === 0) {
-    return (sorted[middle - 1] + sorted[middle]) / 2;
+  const missingConfigs = requiredConfigs.filter(key => typeof config[key] === "undefined");
+  
+  if (missingConfigs.length > 0) {
+    throw new Error(`Missing required config parameters: ${missingConfigs.join(", ")}`);
   }
   
-  return sorted[middle];
-};
+  console.log("✅ Configuration validated successfully");
+}
 
-// Function to calculate Bollinger Bands
-const calculateBollingerBands = (prices, length, deviation) => {
-  const basis = SMA.calculate(length, prices);
-  const stdDev = SD.calculate(length, prices);
-  const upper = basis + (deviation * stdDev);
-  const lower = basis - (deviation * stdDev);
-  
-  return { upper, basis, lower };
-};
-
-// Function to calculate Supertrend
-const calculateSupertrend = (ohlcData, period, multiplier) => {
-  // Need at least period + 1 candles to calculate
-  if (ohlcData.length < period + 1) return { trend: 1, up: 0, down: 0 };
-  
-  // Calculate ATR
-  const trValues = ohlcData.map(candle => {
-    return Math.max(
-      candle.high - candle.low,
-      Math.abs(candle.high - candle.close),
-      Math.abs(candle.low - candle.close)
-    );
-  });
-  
-  const atr = SMA.calculate(period, trValues);
-  
-  // Get last candle
-  const lastCandle = ohlcData[ohlcData.length - 1];
-  const prevCandle = ohlcData[ohlcData.length - 2];
-  
-  // Calculate basic bands
-  const hl2 = (lastCandle.high + lastCandle.low) / 2;
-  const hl2Prev = (prevCandle.high + prevCandle.low) / 2;
-  
-  let up = hl2 - (multiplier * atr);
-  let down = hl2 + (multiplier * atr);
-  
-  // Need to determine previous trend and bands for proper calculation
-  let prevTrend = 1; // Default to uptrend
-  let prevUp = hl2Prev - (multiplier * atr);
-  let prevDown = hl2Prev + (multiplier * atr);
-  
-  // Adjust bands based on previous values (simplified calculation)
-  up = prevCandle.close > prevUp ? Math.max(up, prevUp) : up;
-  down = prevCandle.close < prevDown ? Math.min(down, prevDown) : down;
-  
-  // Determine current trend
-  let trend;
-  if (prevCandle.close > prevDown) {
-    trend = 1; // Uptrend
-  } else if (prevCandle.close < prevUp) {
-    trend = -1; // Downtrend
-  } else {
-    trend = prevTrend; // Continue previous trend
+/**
+ * Calculate Bollinger Bands
+ * @param {Array} prices - Array of price objects with close property
+ * @param {number} length - Bollinger Band length
+ * @param {number} deviation - Standard deviation multiplier
+ * @returns {Object} Bollinger Bands (upper, middle, lower)
+ */
+function calculateBollingerBands(prices, length = config.BB_LENGTH, deviation = config.BB_DEVIATION) {
+  if (prices.length < length) {
+    return null;
   }
   
-  return { trend, up, down };
-};
+  try {
+    const closePrices = prices.map(candle => candle.close);
+    const sma = ta.sma(closePrices, length);
+    const stdDev = ta.stdev(closePrices, length);
+    
+    return {
+      upper: sma + (stdDev * deviation),
+      middle: sma,
+      lower: sma - (stdDev * deviation)
+    };
+  } catch (error) {
+    console.error("❌ Error calculating Bollinger Bands:", error.message);
+    return null;
+  }
+}
 
-// Function to calculate TrendLine signals (simplified version of Pine Script logic)
-const calculateTrendLineSignal = (ohlcData, price, prevPrice, fractalsPeriod) => {
-  if (ohlcData.length < fractalsPeriod) return { buy: false, sell: false };
-  
-  // Find local highs and lows for fractals (simplified approach)
-  const mid = Math.floor(fractalsPeriod / 2);
-  
-  // Get recent price data
-  const last = ohlcData.slice(-fractalsPeriod);
-  
-  // Check if current bar is a fractal high/low point
-  let isHighFractal = true;
-  let isLowFractal = true;
-  
-  for (let i = 0; i < fractalsPeriod; i++) {
-    if (i === mid) continue; // Skip the middle point
-    if (last[mid].high <= last[i].high) isHighFractal = false;
-    if (last[mid].low >= last[i].low) isLowFractal = false;
+/**
+ * Calculate Supertrend indicator
+ * @param {Array} candles - Array of OHLC candles
+ * @param {number} period - ATR period
+ * @param {number} multiplier - ATR multiplier
+ * @returns {Object} Supertrend indicator values
+ */
+function calculateSupertrend(candles, period = config.ST_PERIOD, multiplier = config.ST_MULTIPLIER) {
+  if (candles.length < period) {
+    return null;
   }
   
-  // Get the latest calculated Bollinger Bands
-  const bb = calculateBollingerBands(
-    ohlcData.map(candle => candle.close),
-    CONFIG.bbLength,
-    CONFIG.bbDeviation
-  );
-  
-  // Simplified trendline signals
-  // In a real implementation, this would track and maintain actual trendlines
-  // For this simplified version, we just use fractals and BB for signals
-  
-  const buy = isLowFractal && prevPrice < last[mid].low && price > last[mid].low && price > bb.lower;
-  const sell = isHighFractal && prevPrice > last[mid].high && price < last[mid].high && price < bb.upper;
-  
-  return { buy, sell };
-};
-
-// Function to determine if a candle is complete based on timeframe
-const isCandleComplete = (candle, currentTime) => {
-  const candleEndTime = candle.openTime + TIMEFRAME_MS;
-  return currentTime >= candleEndTime;
-};
-
-// Process strategy signals based on completed candles
-const processStrategy = (completedCandle) => {
-  // Add to price history (for EMA calculation)
-  priceHistory.push(completedCandle.close);
-  if (priceHistory.length > Math.max(CONFIG.emaLongPeriod, CONFIG.bbLength) + 1) {
-    priceHistory.shift();
-  }
-  
-  // Add to OHLC history
-  ohlcHistory.push(completedCandle);
-  if (ohlcHistory.length > Math.max(CONFIG.stPeriod, CONFIG.tlbbFractalsPeriod) + 1) {
-    ohlcHistory.shift();
-  }
-  
-  let signal = "HOLD";
-  
-  // Determine which strategy to use
-  if (CONFIG.strategy === "EMA") {
-    // Original EMA Strategy
-    if (priceHistory.length < CONFIG.emaLongPeriod) {
-      console.log(`⏳ Collecting price data: ${priceHistory.length}/${CONFIG.emaLongPeriod}`);
-      return; // Wait until we have enough data
+  try {
+    // Calculate ATR
+    const highs = candles.map(candle => candle.high);
+    const lows = candles.map(candle => candle.low);
+    const closes = candles.map(candle => candle.close);
+    
+    // Calculate ATR using ta.js
+    const atr = ta.atr(highs, lows, closes, period);
+    
+    // Calculate basic upper and lower bands
+    const upperBand = (highs[highs.length-1] + lows[lows.length-1]) / 2 + (multiplier * atr);
+    const lowerBand = (highs[highs.length-1] + lows[lows.length-1]) / 2 - (multiplier * atr);
+    
+    // Determine trend direction based on previous close and current bands
+    const previousClose = closes[closes.length-2];
+    const currentClose = closes[closes.length-1];
+    
+    let trend;
+    if (currentClose > upperBand) {
+      trend = "up";
+    } else if (currentClose < lowerBand) {
+      trend = "down";
+    } else {
+      // Maintain previous trend
+      if (previousClose > upperBand) {
+        trend = "up";
+      } else if (previousClose < lowerBand) {
+        trend = "down";
+      } else {
+        trend = "neutral";
+      }
     }
     
-    const emaShort = EMA.calculate(CONFIG.emaShortPeriod, priceHistory);
-    const emaLong = EMA.calculate(CONFIG.emaLongPeriod, priceHistory);
+    return {
+      trend,
+      atr,
+      upperBand,
+      lowerBand
+    };
+  } catch (error) {
+    console.error("❌ Error calculating Supertrend:", error.message);
+    return null;
+  }
+}
+
+/**
+ * Calculate TrendLine Indicator based on price action and Bollinger Bands
+ * @param {Array} candles - Array of OHLC candles
+ * @returns {Object} TrendLine indicator values
+ */
+function calculateTrendLine(candles) {
+  if (candles.length < config.TLBB_FRACTALS_PERIOD) {
+    return null;
+  }
+  
+  try {
+    const prices = candles.map(candle => candle.close);
     
-    if (emaShort > emaLong) {
-      signal = "BUY";
-    } else if (emaShort < emaLong) {
-      signal = "SELL";
+    // Calculate Bollinger Bands
+    const bb = calculateBollingerBands(candles);
+    if (!bb) return null;
+    
+    // Find recent swing points (simple implementation)
+    const swingHigh = Math.max(...prices.slice(-config.TLBB_FRACTALS_PERIOD));
+    const swingLow = Math.min(...prices.slice(-config.TLBB_FRACTALS_PERIOD));
+    
+    // Determine trend based on price position relative to BB
+    const currentPrice = prices[prices.length-1];
+    let trend;
+    
+    if (currentPrice > bb.upper) {
+      trend = "strongly_bullish";
+    } else if (currentPrice < bb.lower) {
+      trend = "strongly_bearish";
+    } else if (currentPrice > bb.middle) {
+      trend = "moderately_bullish";
+    } else {
+      trend = "moderately_bearish";
     }
     
-  } else if (CONFIG.strategy === "COMBINED") {
-    // Combined TrendLine BB & Supertrend Strategy
-    if (ohlcHistory.length < Math.max(CONFIG.stPeriod, CONFIG.tlbbFractalsPeriod) + 1) {
-      console.log(`⏳ Collecting OHLC data: ${ohlcHistory.length}/${Math.max(CONFIG.stPeriod, CONFIG.tlbbFractalsPeriod) + 1}`);
-      return; // Wait until we have enough data
+    return {
+      trend,
+      swingHigh,
+      swingLow,
+      bb
+    };
+  } catch (error) {
+    console.error("❌ Error calculating TrendLine:", error.message);
+    return null;
+  }
+}
+
+/**
+ * Handle market data updates and generate signals
+ * @param {Object} marketData - Market data object
+ */
+function handleMarketData(marketData) {
+  // Add price to history
+  priceHistory.push(marketData);
+  
+  // Memory management - limit history size
+  if (priceHistory.length > config.MAX_PRICE_HISTORY) {
+    priceHistory = priceHistory.slice(-config.MAX_PRICE_HISTORY);
+  }
+}
+
+/**
+ * Process candle data and generate signals
+ * @param {Object} candle - Candle data object
+ */
+function processCandle(candle) {
+  try {
+    // Prevent duplicate candle processing
+    if (candle.timestamp <= lastCandleTimestamp) {
+      return;
     }
+    
+    // Update last processed candle timestamp
+    lastCandleTimestamp = candle.timestamp;
+    
+    // Add candle to history
+    ohlcHistory.push(candle);
+    
+    // Memory management - limit history size
+    if (ohlcHistory.length > config.MAX_OHLC_HISTORY) {
+      ohlcHistory = ohlcHistory.slice(-config.MAX_OHLC_HISTORY);
+    }
+    
+    // Only generate signals if we have enough data
+    if (ohlcHistory.length < Math.max(
+      config.EMA_LONG_PERIOD,
+      config.BB_LENGTH,
+      config.ST_PERIOD,
+      config.TLBB_FRACTALS_PERIOD
+    )) {
+      console.log(`📊 Building price history... (${ohlcHistory.length} candles collected)`);
+      return;
+    }
+    
+    // Generate trading signal based on selected strategy
+    generateSignal();
+  } catch (error) {
+    console.error("❌ Error processing candle:", error.message);
+  }
+}
+
+/**
+ * Generate trading signal based on strategy
+ */
+function generateSignal() {
+  try {
+    // Get latest price
+    const currentPrice = ohlcHistory[ohlcHistory.length-1].close;
+    
+    // Select strategy
+    switch (config.STRATEGY) {
+      case "EMA":
+        generateEMASignal(currentPrice);
+        break;
+      case "COMBINED":
+        generateCombinedSignal(currentPrice);
+        break;
+      default:
+        console.warn(`⚠️ Unknown strategy: ${config.STRATEGY}`);
+    }
+  } catch (error) {
+    console.error("❌ Error generating signal:", error.message);
+  }
+}
+
+/**
+ * Generate signal based on EMA crossover strategy
+ * @param {number} currentPrice - Current price
+ */
+function generateEMASignal(currentPrice) {
+  try {
+    const prices = ohlcHistory.map(candle => candle.close);
+    const emaShort = ta.ema(prices, config.EMA_SHORT_PERIOD);
+    const emaLong = ta.ema(prices, config.EMA_LONG_PERIOD);
+    
+    // Check for crossover
+    const previousEmaShort = emaShort[emaShort.length-2];
+    const previousEmaLong = emaLong[emaLong.length-2];
+    const currentEmaShort = emaShort[emaShort.length-1];
+    const currentEmaLong = emaLong[emaLong.length-1];
+    
+    // Generate signal on crossover
+    if (previousEmaShort < previousEmaLong && currentEmaShort > currentEmaLong) {
+      // Buy signal - short EMA crosses above long EMA
+      emitSignal("BUY", currentPrice);
+      
+    } else if (previousEmaShort > previousEmaLong && currentEmaShort < currentEmaLong) {
+      // Sell signal - short EMA crosses below long EMA
+      emitSignal("SELL", currentPrice);
+    }
+  } catch (error) {
+    console.error("❌ Error generating EMA signal:", error.message);
+  }
+}
+
+/**
+ * Generate signal based on combined strategy (Trend Line & Supertrend)
+ * @param {number} currentPrice - Current price
+ */
+function generateCombinedSignal(currentPrice) {
+  try {
+    // Calculate TrendLine BB
+    const tl = calculateTrendLine(ohlcHistory);
     
     // Calculate Supertrend
-    const st = calculateSupertrend(ohlcHistory, CONFIG.stPeriod, CONFIG.stMultiplier);
+    const st = calculateSupertrend(ohlcHistory);
     
-    // Determine Supertrend signals
-    const stBuySignal = st.trend === 1 && (ohlcHistory.length > 1 ? 
-                        calculateSupertrend(ohlcHistory.slice(0, -1), CONFIG.stPeriod, CONFIG.stMultiplier).trend === -1 : false);
-    const stSellSignal = st.trend === -1 && (ohlcHistory.length > 1 ? 
-                         calculateSupertrend(ohlcHistory.slice(0, -1), CONFIG.stPeriod, CONFIG.stMultiplier).trend === 1 : false);
-    
-    // Calculate Trend Line & Bollinger Bands signals
-    const prevPrice = priceHistory.length > 1 ? priceHistory[priceHistory.length - 2] : completedCandle.close;
-    const tlbb = calculateTrendLineSignal(ohlcHistory, completedCandle.close, prevPrice, CONFIG.tlbbFractalsPeriod);
-    
-    // Combined signals
-    const combinedBuySignal = tlbb.buy && stBuySignal;
-    const combinedSellSignal = tlbb.sell && stSellSignal;
-    
-    if (combinedBuySignal) {
-      signal = "BUY";
-    } else if (combinedSellSignal) {
-      signal = "SELL";
+    if (!tl || !st) {
+      return;
     }
     
-    // Log indicator values for debugging
-    console.log(`🔍 Indicators - ST: ${st.trend > 0 ? "UPTREND" : "DOWNTREND"}, TLBB: ${tlbb.buy ? "BUY" : tlbb.sell ? "SELL" : "NEUTRAL"}`);
+    // Check for trade conditions
+    if (tl.trend.includes("bullish") && st.trend === "up") {
+      if (!inPosition || positionType === "short") {
+        // Buy signal when both indicators are bullish
+        inPosition = true;
+        positionType = "long";
+        emitSignal("BUY", currentPrice);
+      }
+    } else if (tl.trend.includes("bearish") && st.trend === "down") {
+      if (!inPosition || positionType === "long") {
+        // Sell signal when both indicators are bearish
+        inPosition = true;
+        positionType = "short";
+        emitSignal("SELL", currentPrice);
+      }
+    } else if (
+      (tl.trend.includes("bearish") && positionType === "long") ||
+      (tl.trend.includes("bullish") && positionType === "short")
+    ) {
+      // Exit signal when trend changes against our position
+      inPosition = false;
+      const signal = positionType === "long" ? "SELL" : "BUY";
+      positionType = null;
+      emitSignal(signal, currentPrice);
+    }
+  } catch (error) {
+    console.error("❌ Error generating Combined signal:", error.message);
   }
+}
+
+/**
+ * Emit trading signal
+ * @param {string} action - Signal action (BUY/SELL)
+ * @param {number} price - Current price
+ */
+function emitSignal(action, price) {
+  const signal = {
+    action,
+    price,
+    timestamp: Date.now(),
+    strategy: config.STRATEGY,
+  };
   
-  // Only log and emit when signal changes
-  if (signal !== lastSignal) {
-    console.log(`📢 Signal: ${signal} (Strategy: ${CONFIG.strategy})`);
-    
-    // Emit the trading signal with relevant data
-    tradingSignalEmitter.emit("signal", {
-      type: signal,
-      price: completedCandle.close,
-      timestamp: Date.now(),
-      strategy: CONFIG.strategy,
-      timeframe: CONFIG.timeframe,
-      candle: completedCandle
-    });
-    
-    lastSignal = signal;
-  }
+  console.log("🚀 Generated Signal:", signal);
+  
+  // Emit the signal
+  marketDataEmitter.emit("signal", signal);
+  signalEmitter.emit("signal", signal);
+}
+
+// Initialize by validating configuration
+validateConfig();
+
+// Subscribe to market data events
+marketDataEmitter.on("marketData", handleMarketData);
+marketDataEmitter.on("candle", processCandle);
+
+// Export functions for testing
+module.exports = {
+  processCandle,
+  calculateBollingerBands,
+  calculateSupertrend,
+  calculateTrendLine,
+  signalEmitter
 };
-
-// Initialize the first candle when we start receiving market data
-let isFirstData = true;
-
-marketDataEmitter.on("marketData", (marketData) => {
-  const currentPrice = parseFloat(marketData.price);
-  const currentTime = Date.now();
-  
-  console.log(`📈 New Price Update: ${currentPrice} @ ${new Date(currentTime).toLocaleTimeString()}`);
-  
-  // Initialize the first candle
-  if (isFirstData) {
-    // Round down to nearest timeframe boundary
-    const timeframeBoundary = Math.floor(currentTime / TIMEFRAME_MS) * TIMEFRAME_MS;
-    
-    currentCandle = {
-      open: currentPrice,
-      high: currentPrice,
-      low: currentPrice,
-      close: currentPrice,
-      openTime: timeframeBoundary,
-      volume: 0
-    };
-    
-    isFirstData = false;
-    console.log(`🕒 Started new ${CONFIG.timeframe} candle at ${new Date(timeframeBoundary).toLocaleTimeString()}`);
-    return;
-  }
-  
-  // Check if we need to close the current candle and start a new one
-  if (isCandleComplete(currentCandle, currentTime)) {
-    console.log(`🕒 Completed ${CONFIG.timeframe} candle: O:${currentCandle.open} H:${currentCandle.high} L:${currentCandle.low} C:${currentCandle.close}`);
-    
-    // Process strategy with the completed candle
-    processStrategy(currentCandle);
-    
-    // Start a new candle
-    const newCandleOpenTime = currentCandle.openTime + TIMEFRAME_MS;
-    currentCandle = {
-      open: currentPrice,
-      high: currentPrice,
-      low: currentPrice,
-      close: currentPrice,
-      openTime: newCandleOpenTime,
-      volume: 0
-    };
-    
-    console.log(`🕒 Started new ${CONFIG.timeframe} candle at ${new Date(newCandleOpenTime).toLocaleTimeString()}`);
-  } else {
-    // Update the current candle
-    currentCandle.high = Math.max(currentCandle.high, currentPrice);
-    currentCandle.low = Math.min(currentCandle.low, currentPrice);
-    currentCandle.close = currentPrice;
-    currentCandle.volume += 1; // This is just a count of updates, not actual volume
-  }
-});
-
-module.exports = { tradingSignalEmitter };

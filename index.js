@@ -1,68 +1,70 @@
-// Import required modules
-require("./strategy"); // Just require strategy to initialize the WebSocket listeners
-const { placeOrder } = require("./trader");
-const { marketDataEmitter } = require("./okx-client");
+require("dotenv").config();
+const config = require("./config");
+const { connectWebSocket, marketDataEmitter } = require("./okx-client");
+const { processCandle } = require("./strategy");
+const { placeOrder, setLeverage } = require("./trader");
 
-const SYMBOL = "BTC-USDT";
-const TRADE_SIZE = "0.001"; // Adjust based on capital
-
-// Track last trade to avoid excessive trading
+// Global variables
 let lastTradeTime = 0;
-const TRADE_COOLDOWN = 60000; // 1 minute cooldown between trades
+let isTrading = false;
 
-// Listen for trading signals from the strategy
-marketDataEmitter.on("marketData", (marketData) => {
-  // Initialize the bot
-  console.log(` Bot monitoring ${SYMBOL} at $${marketData.price}`);
-});
-
-// Create a separate event listener for trading signals
-// This could be added to strategy.js instead, but keeping it here for clarity
-const { EMA } = require("ta.js");
-let priceHistory = [];
-let lastDecision = "HOLD";
-
-marketDataEmitter.on("marketData", async (marketData) => {
-  // Update price history
-  priceHistory.push(marketData.price);
-  if (priceHistory.length > 21) priceHistory.shift(); // Keep last 21 prices
-
-  if (priceHistory.length < 21) return; // Wait until we have enough data
-
-  // Calculate EMAs
-  const ema9 = EMA.calculate(9, priceHistory);
-  const ema21 = EMA.calculate(21, priceHistory);
-
-  // Determine trading decision
-  let decision = "HOLD";
-  if (ema9 > ema21) {
-    decision = "BUY";
-  } else if (ema9 < ema21) {
-    decision = "SELL";
+// Initialize the bot
+async function init() {
+  console.log("🚀 Starting OKX Trading Bot...");
+  console.log(`💱 Trading ${config.TRADING_PAIR} with ${config.LEVERAGE}x leverage in ${config.TRADE_MODE} mode (FUTURES)`);
+  console.log(`📊 Strategy: ${config.STRATEGY} with ${config.TIMEFRAME} timeframe`);
+  
+  // Setup error handling
+  process.on("uncaughtException", (error) => {
+    console.error("🔥 CRITICAL ERROR:", error);
+    // Attempt graceful shutdown
+    process.exit(1);
+  });
+  
+  process.on("unhandledRejection", (reason, promise) => {
+    console.error("🔥 Unhandled Promise Rejection:", reason);
+  });
+  
+  // Connect to the OKX WebSocket
+  connectWebSocket();
+  
+  // Initialize leverage
+  try {
+    await setLeverage();
+    console.log("✅ Leverage set successfully");
+  } catch (error) {
+    console.error("❌ Failed to set leverage:", error.message);
   }
+}
 
-  // Only log when decision changes
-  if (decision !== lastDecision) {
-    console.log(` Trading Signal: ${decision}`);
-    lastDecision = decision;
-  }
-
-  // Check if we should execute a trade
+// Handle trading signals
+marketDataEmitter.on("signal", async (signal) => {
+  console.log(`🔔 Received signal: ${signal.action} at $${signal.price}`);
+  
+  // Check if trading is allowed (cooldown period)
   const now = Date.now();
-  if ((decision === "BUY" || decision === "SELL") &&
-      now - lastTradeTime > TRADE_COOLDOWN) {
-
-    console.log(` Executing ${decision} order...`);
+  if (now - lastTradeTime < config.TRADE_COOLDOWN) {
+    console.log("⏳ Trade cooldown in effect, skipping this signal...");
+    return;
+  }
+  
+  if (!isTrading) {
+    isTrading = true;
     try {
-      await placeOrder(SYMBOL, decision, TRADE_SIZE);
-      lastTradeTime = now;
+      await placeOrder(config.TRADING_PAIR, signal.action, config.TRADE_SIZE);
+      lastTradeTime = Date.now();
     } catch (error) {
-      console.error(" Trade execution error:", error);
+      console.error("❌ Error executing trade:", error.message);
+    } finally {
+      isTrading = false;
     }
+  } else {
+    console.log("🔒 Trading in progress, skipping this signal...");
   }
 });
 
-// Log startup message
-console.log(" OKX Scalping Bot Starting...");
-console.log(` Monitoring ${SYMBOL}`);
-console.log(" Waiting for enough price data to generate signals...");
+// Start the bot
+init().catch(error => {
+  console.error("❌ Initialization error:", error.message);
+  process.exit(1);
+});
