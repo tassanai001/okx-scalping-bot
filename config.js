@@ -11,6 +11,10 @@ module.exports = {
   USE_PERCENTAGE_OF_BALANCE: 10,       // Use 10% of available balance for each trade
   USE_PERCENTAGE_OF_BALANCE_CURRENCY: "USDT", // Currency to check balance
   
+  // Risk management
+  STOP_LOSS_PERCENTAGE: 1.5,      // Stop loss percentage from entry price
+  TAKE_PROFIT_PERCENTAGE: 3,      // Take profit percentage from entry price
+  
   // Futures specific settings
   TRADE_MODE: "cross",    // Options: "cross" or "isolated"
   LEVERAGE: "3",          // Leverage multiplier (3x)

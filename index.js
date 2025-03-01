@@ -19,6 +19,8 @@ async function initBot() {
     console.log(`⚙️ Mode: ${config.TRADE_MODE}`);
     console.log(`📈 Leverage: ${config.LEVERAGE}x`);
     console.log(`💰 Using ${config.USE_PERCENTAGE_OF_BALANCE}% of ${config.USE_PERCENTAGE_OF_BALANCE_CURRENCY} balance per trade`);
+    console.log(`🛑 Stop Loss: ${config.STOP_LOSS_PERCENTAGE}% from entry price`);
+    console.log(`🎯 Take Profit: ${config.TAKE_PROFIT_PERCENTAGE}% from entry price`);
     if (config.USE_SIMULATED_TRADING) {
       console.log(`🧪 SIMULATED TRADING MODE ENABLED (Demo)`);
     }

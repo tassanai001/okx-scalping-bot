@@ -7,6 +7,7 @@ A Node.js trading bot for OKX exchange, designed for BTC-USDT futures trading wi
 - Trade BTC-USDT futures on OKX
 - Leverage and cross-margin support
 - Dynamic position sizing (percentage of account balance)
+- Configurable stop-loss and take-profit levels
 - Combined strategy using Bollinger Bands, TrendLine, and Supertrend indicators
 - Simulated trading mode for safe testing
 - Automatic stop-loss and take-profit orders
@@ -24,6 +25,10 @@ module.exports = {
   
   // Dynamic position sizing
   USE_PERCENTAGE_OF_BALANCE: 10,  // Use 10% of available balance for each trade
+  
+  // Risk management
+  STOP_LOSS_PERCENTAGE: 1.5,      // Stop loss percentage from entry price
+  TAKE_PROFIT_PERCENTAGE: 3,      // Take profit percentage from entry price
   
   // Futures specific settings
   TRADE_MODE: "cross",            // Options: "cross" or "isolated"
@@ -64,6 +69,16 @@ The bot supports simulated trading (paper trading) for risk-free testing:
 1. Create Demo API keys from your OKX account
 2. Set `USE_SIMULATED_TRADING: true` in `config.js`
 3. Run the bot as normal
+
+## Risk Management
+
+The bot includes configurable risk management settings:
+
+- **Stop Loss**: Set as a percentage from entry price (default: 1.5%)
+- **Take Profit**: Set as a percentage from entry price (default: 3%)
+- **Position Sizing**: Uses a percentage of your available balance
+
+These values can be adjusted in the `config.js` file to match your risk tolerance and trading strategy.
 
 ## Important Notes
 

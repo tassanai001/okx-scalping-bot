@@ -37,7 +37,7 @@ function generateSignature(timestamp, method, requestPath, body = null) {
 function createHeaders(method, requestPath, body = null) {
   const timestamp = new Date().toISOString();
   const signature = generateSignature(timestamp, method, requestPath, body);
-  
+
   const headers = {
     "OK-ACCESS-KEY": apiKey,
     "OK-ACCESS-SIGN": signature,
@@ -45,13 +45,13 @@ function createHeaders(method, requestPath, body = null) {
     "OK-ACCESS-PASSPHRASE": passphrase,
     "Content-Type": "application/json"
   };
-  
+
   // Add simulated trading header if enabled
   if (config.USE_SIMULATED_TRADING) {
     headers["x-simulated-trading"] = "1";
     console.log("🧪 Using simulated trading mode (demo)");
   }
-  
+
   return headers;
 }
 
@@ -67,17 +67,17 @@ async function getTradeSize(currency = "USDT", percentage = 10) {
     const queryParams = currency ? `?ccy=${currency}` : '';
     const fullPath = balancePath + queryParams;
     const headers = createHeaders("GET", fullPath, null);
-    
+
     const response = await axios.get(
       `${config.OKX_API_URL}${fullPath}`,
       { headers }
     );
-    
+
     if (!response.data || !response.data.data || !response.data.data.length) {
       console.error("🚨 Failed to fetch account balance");
       return config.TRADE_SIZE; // Fall back to config value
     }
-    
+
     // Find the currency in the balance data
     let balance = 0;
     for (const account of response.data.data) {
@@ -88,32 +88,32 @@ async function getTradeSize(currency = "USDT", percentage = 10) {
         }
       }
     }
-    
+
     if (balance <= 0) {
       console.error(`🚨 No available balance found for ${currency}`);
       return config.TRADE_SIZE; // Fall back to config value
     }
-    
+
     // Calculate trade size as percentage of balance
     const tradeSize = (balance * (percentage / 100)).toFixed(6);
     console.log(`💰 Account Balance: ${balance} ${currency}`);
     console.log(`📊 Using ${percentage}% for trade: ${tradeSize} ${currency}`);
-    
+
     // For BTC-USDT-SWAP, we need to convert USDT value to BTC quantity
     // This requires getting the current BTC price
     const tickerPath = `/api/v5/market/ticker?instId=${config.TRADING_PAIR}`;
     const marketData = await axios.get(`${config.OKX_API_URL}${tickerPath}`);
-    
+
     if (!marketData.data || !marketData.data.data || !marketData.data.data.length) {
       console.error("🚨 Failed to fetch market price");
       return tradeSize;
     }
-    
+
     const btcPrice = parseFloat(marketData.data.data[0].last);
     // Calculate BTC quantity based on USDT value
     const btcQuantity = (tradeSize / btcPrice).toFixed(6);
     console.log(`🔄 Converting to BTC: ${btcQuantity} BTC at price $${btcPrice}`);
-    
+
     return btcQuantity;
   } catch (error) {
     console.error("🚨 Error calculating trade size:", error.response && error.response.data ? error.response.data : error.message);
@@ -135,15 +135,15 @@ async function setLeverage(symbol = config.TRADING_PAIR, leverage = config.LEVER
       lever: leverage,
       mgnMode: config.TRADE_MODE
     };
-    
+
     const headers = createHeaders("POST", leveragePath, leverageBody);
-    
+
     const response = await axios.post(
       `${config.OKX_API_URL}${leveragePath}`,
       leverageBody,
       { headers }
     );
-    
+
     if (response.data && response.data.code === "0") {
       console.log(`📈 Leverage set to ${leverage}x for ${symbol} in ${config.TRADE_MODE} mode`);
       return true;
@@ -167,38 +167,51 @@ async function setLeverage(symbol = config.TRADING_PAIR, leverage = config.LEVER
 async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
   try {
     console.log(`🔄 Preparing ${side} order for ${symbol}...`);
-    
+
     // Dynamically calculate trade size if not provided
     if (!size) {
       size = await getTradeSize(config.USE_PERCENTAGE_OF_BALANCE_CURRENCY, config.USE_PERCENTAGE_OF_BALANCE);
     }
-    
+
     console.log(`💱 Order size: ${size} for ${symbol}`);
-    
+
     // Ensure leverage is set correctly
     await setLeverage(symbol, config.LEVERAGE);
-    
+
     // Get latest price
     const tickerPath = `/api/v5/market/ticker?instId=${symbol}`;
     const marketData = await axios.get(`${config.OKX_API_URL}${tickerPath}`);
-    
+
     if (!marketData.data || !marketData.data.data || !marketData.data.data.length) {
       throw new Error("Failed to fetch market data");
     }
-    
+
     const lastPrice = parseFloat(marketData.data.data[0].last);
     console.log(`📊 Current price: $${lastPrice}`);
 
     // Define position side
     const posSide = side.toLowerCase() === "buy" ? "long" : "short";
-    
-    // Define SL & TP levels (0.5% SL, 1% TP)
-    const stopLoss = side === "BUY" ? (lastPrice * 0.995).toFixed(2) : (lastPrice * 1.005).toFixed(2);
-    const takeProfit = side === "BUY" ? (lastPrice * 1.01).toFixed(2) : (lastPrice * 0.99).toFixed(2);
+
+    // Calculate SL & TP levels based on configuration
+    const slPercent = config.STOP_LOSS_PERCENTAGE / 100;
+    const tpPercent = config.TAKE_PROFIT_PERCENTAGE / 100;
+
+    // For BUY/LONG: SL is below entry, TP is above entry
+    // For SELL/SHORT: SL is above entry, TP is below entry
+    const stopLoss = side === "BUY"
+      ? (lastPrice * (1 - slPercent)).toFixed(2)
+      : (lastPrice * (1 + slPercent)).toFixed(2);
+
+    const takeProfit = side === "BUY"
+      ? (lastPrice * (1 + tpPercent)).toFixed(2)
+      : (lastPrice * (1 - tpPercent)).toFixed(2);
+
+    console.log(`🛑 Stop Loss: ${stopLoss} (${config.STOP_LOSS_PERCENTAGE}% from entry)`);
+    console.log(`🎯 Take Profit: ${takeProfit} (${config.TAKE_PROFIT_PERCENTAGE}% from entry)`);
 
     // API paths
     const orderPath = "/api/v5/trade/order";
-    
+
     // Place Futures Market Order
     const orderBody = {
       instId: symbol,
@@ -209,9 +222,9 @@ async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
       sz: size,
       lever: config.LEVERAGE
     };
-    
+
     const orderHeaders = createHeaders("POST", orderPath, orderBody);
-    
+
     const order = await axios.post(
       `${config.OKX_API_URL}${orderPath}`,
       orderBody,
@@ -236,15 +249,15 @@ async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
       posSide: posSide,
       ordType: "conditional",
       sz: size,
-      tpTriggerPx: "", 
+      tpTriggerPx: "",
       tpOrdPx: "",
       slTriggerPx: stopLoss,
       slOrdPx: "-1",   // Market price
       triggerPxType: "last",
     };
-    
+
     const slOrderHeaders = createHeaders("POST", orderPath, slOrderBody);
-    
+
     const slOrder = await axios.post(
       `${config.OKX_API_URL}${orderPath}`,
       slOrderBody,
@@ -253,7 +266,7 @@ async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
 
     console.log(`🛑 Stop-Loss Set at $${stopLoss}`);
 
-    // Place Take-Profit Order  
+    // Place Take-Profit Order
     const tpOrderBody = {
       instId: symbol,
       tdMode: config.TRADE_MODE,
@@ -267,9 +280,9 @@ async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
       slOrdPx: "",
       triggerPxType: "last",
     };
-    
+
     const tpOrderHeaders = createHeaders("POST", orderPath, tpOrderBody);
-    
+
     const tpOrder = await axios.post(
       `${config.OKX_API_URL}${orderPath}`,
       tpOrderBody,
@@ -277,7 +290,7 @@ async function placeOrder(symbol = config.TRADING_PAIR, side, size = null) {
     );
 
     console.log(`🎯 Take-Profit Set at $${takeProfit}`);
-    
+
     return {
       orderId,
       symbol,
