@@ -18,6 +18,7 @@ module.exports = {
   // Futures specific settings
   TRADE_MODE: "cross",    // Options: "cross" or "isolated"
   LEVERAGE: "3",          // Leverage multiplier (3x)
+  POSITION_MODE: "net_mode", // Options: "net_mode" (buy/sell) or "long_short_mode" (long/short)
   
   // Simulated trading (Demo mode)
   USE_SIMULATED_TRADING: true,    // Set to true to use simulated trading (demo)

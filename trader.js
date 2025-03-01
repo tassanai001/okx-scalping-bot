@@ -122,19 +122,30 @@ async function getTradeSize(currency = "USDT", percentage = 10) {
 }
 
 /**
- * Set leverage for the trading pair
+ * Set leverage for trading
  * @param {string} symbol - Trading pair symbol
  * @param {string} leverage - Leverage value
  * @returns {Promise<boolean>} Success status
  */
 async function setLeverage(symbol = config.TRADING_PAIR, leverage = config.LEVERAGE) {
   try {
-    const leveragePath = "/api/v5/trade/set-leverage";
+    console.log(`📈 Setting ${leverage}x leverage for ${symbol}...`);
+    
+    // Update to correct API endpoint (account not trade)
+    const leveragePath = "/api/v5/account/set-leverage";
+    
+    // For SWAP instruments like BTC-USDT-SWAP, follow the correct format based on trade mode
     const leverageBody = {
       instId: symbol,
       lever: leverage,
       mgnMode: config.TRADE_MODE
     };
+    
+    // Add posSide parameter if using long/short position mode
+    if (config.POSITION_MODE === 'long_short_mode') {
+      leverageBody.posSide = "long"; // Set leverage for long positions
+      // Note: You would need to make a separate call for short positions
+    }
 
     const headers = createHeaders("POST", leveragePath, leverageBody);
 
@@ -148,11 +159,11 @@ async function setLeverage(symbol = config.TRADING_PAIR, leverage = config.LEVER
       console.log(`📈 Leverage set to ${leverage}x for ${symbol} in ${config.TRADE_MODE} mode`);
       return true;
     } else {
-      console.error(`🚨 Failed to set leverage: ${JSON.stringify(response.data)}`);
+      console.error("🚨 Failed to set leverage:", response.data);
       return false;
     }
   } catch (error) {
-    console.error("🚨 Leverage Error:", error.response && error.response.data ? error.response.data : error.message);
+    console.error("🚨 Error setting leverage:", error.response && error.response.data ? error.response.data : error.message);
     return false;
   }
 }
